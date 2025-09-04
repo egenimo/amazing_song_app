@@ -203,7 +203,7 @@ class PracticeApp:
         # Apply speed
         seg = seg._spawn(seg.raw_data, overrides={
             "frame_rate": int(seg.frame_rate * self.speed)
-        }).set_frame_rate(seg.frame_rate)
+        }).set_frame_rate(seg.frame_rate * self.speed)
 
         # Apply tempo (time-stretch without pitch change)
         if self.tempo != 1.0:
