@@ -8,10 +8,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+class AppState:
+    IDLE = "idle" # No song loaded or stopped
+    LOADED = "loaded" # Song loaded, ready to play
+    PLAYING = "playing" # Currently playing
+    PAUSED = "paused" # Paused
+
 class PracticeApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Guitar Practice App")
+
+        # State machine
+        self.state = AppState.IDLE
 
         # Audio
         self.audio = None
@@ -33,23 +42,29 @@ class PracticeApp:
         self.load_btn = tk.Button(root, text="Load MP3", command=self.load_file)
         self.load_btn.pack(pady=5)
 
-        self.speed_scale = tk.Scale(root, from_=0.5, to=2.0, resolution=0.1,
+        self.clear_btn = tk.Button(root, text="Clear", command=self.clear_song)
+        self.clear_btn.pack(pady=5)
+
+        self.speed_scale = tk.Scale(root, from_=40, to=180, resolution=1,
                                     orient="horizontal", label="Speed (Pitch+Tempo)", command=self.update_speed)
         self.speed_scale.set(1.0)
         self.speed_scale.pack(fill="x")
 
-        self.tempo_scale = tk.Scale(root, from_=0.5, to=2.0, resolution=0.1,
-                                    orient="horizontal", label="Tempo (%100 = Normal)", command=self.update_tempo)
-        self.tempo_scale.set(1.0)
-        self.tempo_scale.pack(fill="x")
+        self.start_to_end_scale = tk.Scale(root, from_=self.start_ms, to=self.end_ms, resolution=0.1,
+                                           orient="horizontal", label="Song scale", command=self.move_to_timestamp)
+        self.start_to_end_scale.set(0)
+        self.start_to_end_scale.pack(fill="x")
 
-        self.volume_scale = tk.Scale(root, from_=-20, to=10, resolution=1,
+        self.volume_scale = tk.Scale(root, from_=0, to=40, resolution=1,
                                      orient="horizontal", label="Volume (dB)", command=self.update_volume)
         self.volume_scale.set(0)
         self.volume_scale.pack(fill="x")
 
         self.play_btn = tk.Button(root, text="Play", command=self.play_audio)
         self.play_btn.pack(pady=5)
+
+        self.pause_btn = tk.Button(root, text="Pause", command=self.pause_audio)
+        self.pause_btn.pack(pady=5)
 
         self.stop_btn = tk.Button(root, text="Stop", command=self.stop_audio)
         self.stop_btn.pack(pady=5)
@@ -65,14 +80,66 @@ class PracticeApp:
 
         self.metronome_on = False
 
+        self.update_ui_state()
+
+    def set_state(self, new_state):
+        self.state = new_state
+        self.update_ui_state()
+
+    def update_ui_state(self):
+        # Enable/disable buttons based on state
+        if self.state == AppState.IDLE:
+            self.play_btn.config(state="disabled")
+            self.pause_btn.config(state="disabled")
+            self.stop_btn.config(state="disabled")
+            self.clear_btn.config(state="disabled")
+        elif self.state == AppState.LOADED:
+            self.play_btn.config(state="normal")
+            self.pause_btn.config(state="disabled")
+            self.stop_btn.config(state="disabled")
+            self.clear_btn.config(state="normal")
+        elif self.state == AppState.PLAYING:
+            self.play_btn.config(state="disabled")
+            self.pause_btn.config(state="normal")
+            self.stop_btn.config(state="normal")
+            self.clear_btn.config(state="disabled")
+        elif self.state == AppState.PAUSED:
+            self.play_btn.config(state="normal")
+            self.pause_btn.config(state="disabled")
+            self.stop_btn.config(state="normal")
+            self.clear_btn.config(state="disabled")
+        elif self.state == AppState.STOPPED:
+            self.play_btn.config(state="normal")
+            self.pause_btn.config(state="disabled")
+            self.stop_btn.config(state="disabled")
+            self.clear_btn.config(state="normal")
+
     def load_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("MP3 files", "*.mp3")])
         if file_path:
             self.audio = AudioSegment.from_mp3(file_path)
             self.end_ms = len(self.audio)
+            self.start_ms = 0
             self.plot_waveform()
+            self.set_state(AppState.LOADED)
+        else:
+            # print on gui with ("No file selected")
+            self.set_state(AppState.IDLE)
+
+    def clear_song(self):
+        self.stop_audio()
+        self.audio = None
+        self.ax.clear()
+        self.canvas.draw()
+        self.start_ms = 0
+        self.end_ms = None
+        self.set_state(AppState.IDLE)
 
     def plot_waveform(self):
+        if self.audio is None:
+            self.ax.clear()
+            self.canvas.draw()
+            return
         samples = np.array(self.audio.get_array_of_samples())
         if self.audio.channels == 2:
             samples = samples.reshape((-1, 2))
@@ -111,11 +178,15 @@ class PracticeApp:
         self.ax.set_xlim([0, times[-1]])
         self.canvas.draw()
 
+    def move_to_timestamp(self, val):
+        if self.audio is None:
+            return
+        pos_ms = int(float(val))
+        self.pos_ms = pos_ms
+        self.draw_markers()
+
     def update_speed(self, val):
         self.speed = float(val)
-
-    def update_tempo(self, val):
-        self.tempo = float(val)
 
     def update_volume(self, val):
         self.volume = float(val)
@@ -129,7 +200,7 @@ class PracticeApp:
 
         seg = self.audio[self.start_ms:self.end_ms]
 
-        # Apply speed (affects pitch + tempo)
+        # Apply speed
         seg = seg._spawn(seg.raw_data, overrides={
             "frame_rate": int(seg.frame_rate * self.speed)
         }).set_frame_rate(seg.frame_rate)
@@ -143,25 +214,36 @@ class PracticeApp:
 
         return seg
 
+    def play_loop(self):
+        self.set_state(AppState.PLAYING)
+        self.playing = True
+        while self.playing:
+            seg = self.get_processed_segment()
+            if seg is None:
+                break
+            self.play_obj = _play_with_simpleaudio(seg)
+            self.play_obj.wait_done()
+            if self.playing:
+                self.set_state(AppState.STOPPED)
+                self.playing = False
+
     def play_audio(self):
         if self.audio is None:
             return
+        threading.Thread(target=self.play_loop, daemon=True).start()
 
-        def play_loop():
-            self.playing = True
-            while self.playing:
-                seg = self.get_processed_segment()
-                if seg is None:
-                    break
-                self.play_obj = _play_with_simpleaudio(seg)
-                self.play_obj.wait_done()
-
-        threading.Thread(target=play_loop, daemon=True).start()
+    def pause_audio(self):
+        if self.state == AppState.PLAYING and self.play_obj:
+            self.playing = False
+            self.play_obj.stop()
+            self.set_state(AppState.PAUSED)
 
     def stop_audio(self):
-        self.playing = False
-        if self.play_obj:
-            self.play_obj.stop()
+        if self.state in [AppState.PLAYING, AppState.PAUSED]:
+            self.playing = False
+            if self.play_obj:
+                self.play_obj.stop()
+            self.set_state(AppState.STOPPED)
 
     def toggle_metronome(self):
         if not self.metronome_on:
