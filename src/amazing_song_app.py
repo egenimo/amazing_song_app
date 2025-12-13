@@ -33,7 +33,8 @@ class PracticeApp:
         self.current_pos_ms = 0  # Track current playback position
         self.start_ms = 0
         self.end_ms = None
-        self.speed = 1.0
+        self.speed_percent = 100
+        self.pending_speed = 100
         self.tempo = 1.0
         self.volume = 0.0
         self.clock = pygame.time.Clock()
@@ -63,9 +64,10 @@ class PracticeApp:
                                        showvalue=0, label="Progress", command=self.on_scale_change)
         self.progress_scale.pack(fill="x")
 
-        self.speed_scale = tk.Scale(root, from_=40, to=180, resolution=1,
-                                    orient="horizontal", label="Speed", command=self.update_speed)
-        self.speed_scale.set(1.0)
+        self.speed_scale = tk.Scale(root, from_=50, to=160, resolution=1,
+                                    orient="horizontal", label="Speed (%)", command=self.on_speed_drag)
+        self.speed_scale.bind("<ButtonRelease-1>", self.on_speed_commit)
+        self.speed_scale.set(100)
         self.speed_scale.pack(fill="x")
 
         self.volume_scale = tk.Scale(root, from_=0, to=40, resolution=1,
@@ -160,7 +162,7 @@ class PracticeApp:
 
     def get_mixer_args(self):
         return {
-            "frequency": int(self.audio.frame_rate * self.speed),
+            "frequency": int(self.audio.frame_rate * self.speed_percent / 100),
             "size": -16,
             "channels": self.audio.channels,
             "buffer": 4096
@@ -237,8 +239,45 @@ class PracticeApp:
         self.update_time_label()
 
 
+    def on_speed_drag(self, val):
+        self.pending_speed = int(val)
+
+    def on_speed_commit(self, event):
+        if self.audio is None:
+            return
+
+        self.speed_percent = self.pending_speed
+
+        if self.state == AppState.PLAYING:
+            self.restart_playback()
+    
+    def restart_playback(self):
+        pygame.mixer.stop()
+
+        elapsed = int((time.time() - self.play_start_time) * 1000)
+        self.current_pos_ms = min(self.start_ms + elapsed, self.end_ms)
+        self.start_ms = self.current_pos_ms
+
+        self.play_audio()
+
+
     def update_speed(self, val):
-        self.speed = float(val)
+        self.speed = float(val) / 100.0
+        if self.state == AppState.PLAYING:
+            # pause and restart playback at new speed
+            self.pause_audio()
+            self.playing = False
+            if self.channel:
+                self.channel.stop()
+            
+            self.play_audio()
+
+        if self.state in [AppState.LOADED, AppState.PAUSED, AppState.STOPPED]:
+            self.playing = False
+            if self.channel:
+                self.channel.stop()
+
+            self.play_audio()
 
     def update_volume(self, val):
         self.volume = float(val)
@@ -253,9 +292,9 @@ class PracticeApp:
         seg = self.audio[self.start_ms:self.end_ms]
 
         # Speed (frame rate change)
-        if self.speed != 1.0:
+        if self.speed_percent != 100:
             seg = seg._spawn(seg.raw_data, overrides={
-                "frame_rate": int(seg.frame_rate * self.speed)
+                "frame_rate": int(seg.frame_rate * self.speed_percent / 100)
             }).set_frame_rate(seg.frame_rate)
 
         # Volume
@@ -305,6 +344,7 @@ class PracticeApp:
         self.current_pos_ms = 0
         self.start_ms = 0
         self.progress_scale.set(0)
+        self.speed_scale.set(100)
         self.update_time_label()
 
         self.set_state(AppState.STOPPED)
