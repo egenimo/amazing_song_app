@@ -13,11 +13,12 @@ class AppState:
     LOADED = "loaded" # Song loaded, ready to play
     PLAYING = "playing" # Currently playing
     PAUSED = "paused" # Paused
+    STOPPED = "stopped" # Stopped after playing
 
 class PracticeApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Guitar Practice App")
+        self.root.title("Guitar with your guitar app")
 
         # State machine
         self.state = AppState.IDLE
@@ -26,6 +27,7 @@ class PracticeApp:
         self.audio = None
         self.play_obj = None
         self.playing = False
+        self.current_pos_ms = 0  # Track current playback position
         self.start_ms = 0
         self.end_ms = None
         self.speed = 1.0
@@ -45,15 +47,19 @@ class PracticeApp:
         self.clear_btn = tk.Button(root, text="Clear", command=self.clear_song)
         self.clear_btn.pack(pady=5)
 
+        # Time display label
+        self.time_label = tk.Label(root, text="0:00 / 0:00", font=("Arial", 10))
+        self.time_label.pack(pady=5)
+        self.time_label.pack(pady=5)
+
+        # Progress scale
+        self.progress_scale = tk.Scale(root, from_=0, to=0, orient="horizontal", showvalue=0, label="Progress", command=self.on_scale_change)
+        self.progress_scale.pack(fill="x")
+
         self.speed_scale = tk.Scale(root, from_=40, to=180, resolution=1,
-                                    orient="horizontal", label="Speed (Pitch+Tempo)", command=self.update_speed)
+                                    orient="horizontal", label="Speed", command=self.update_speed)
         self.speed_scale.set(1.0)
         self.speed_scale.pack(fill="x")
-
-        self.start_to_end_scale = tk.Scale(root, from_=self.start_ms, to=self.end_ms, resolution=0.1,
-                                           orient="horizontal", label="Song scale", command=self.move_to_timestamp)
-        self.start_to_end_scale.set(0)
-        self.start_to_end_scale.pack(fill="x")
 
         self.volume_scale = tk.Scale(root, from_=0, to=40, resolution=1,
                                      orient="horizontal", label="Volume (dB)", command=self.update_volume)
@@ -81,6 +87,22 @@ class PracticeApp:
         self.metronome_on = False
 
         self.update_ui_state()
+
+    def format_time(self, ms):
+        """Convert milliseconds to MM:SS format"""
+        minutes = ms // 60000
+        seconds = (ms % 60000) // 1000
+        millis = ms % 1000
+        return f"{minutes}:{seconds:02d}:{millis:03d}"
+
+    def update_time_label(self):
+        """Update the time display label"""
+        if self.end_ms is None:
+            total_time_str = "0:00:000"
+        else:
+            total = self.format_time(self.end_ms)
+        current = self.format_time(self.current_pos_ms)
+        self.time_label.config(text=f"{current} / {total}")
 
     def set_state(self, new_state):
         self.state = new_state
@@ -120,6 +142,9 @@ class PracticeApp:
             self.audio = AudioSegment.from_mp3(file_path)
             self.end_ms = len(self.audio)
             self.start_ms = 0
+            self.current_pos_ms = 0
+            self.progress_scale.config(to=self.end_ms)
+            self.update_time_label()
             self.plot_waveform()
             self.set_state(AppState.LOADED)
         else:
@@ -133,6 +158,8 @@ class PracticeApp:
         self.canvas.draw()
         self.start_ms = 0
         self.end_ms = None
+        self.current_pos_ms = 0
+        self.update_time_label()
         self.set_state(AppState.IDLE)
 
     def plot_waveform(self):
@@ -148,6 +175,7 @@ class PracticeApp:
         self.ax.clear()
         self.ax.plot(times, samples, color="blue")
         self.ax.set_xlim([0, times[-1]])
+        self.ax.set_title("Waveform")
         self.ax.set_xlabel("Time (s)")
         self.ax.set_ylabel("Amplitude")
         self.canvas.draw()
@@ -185,6 +213,14 @@ class PracticeApp:
         self.pos_ms = pos_ms
         self.draw_markers()
 
+    def on_scale_change(self, val):
+        if self.audio is None or self.state == AppState.PLAYING:
+            return
+
+        self.current_pos_ms = int(val)
+        self.start_ms = self.current_pos_ms
+        self.update_time_label()
+
     def update_speed(self, val):
         self.speed = float(val)
 
@@ -215,27 +251,37 @@ class PracticeApp:
         return seg
 
     def play_loop(self):
-        self.set_state(AppState.PLAYING)
-        self.playing = True
-        while self.playing:
-            seg = self.get_processed_segment()
-            if seg is None:
-                break
-            self.play_obj = _play_with_simpleaudio(seg)
-            self.play_obj.wait_done()
-            if self.playing:
-                self.set_state(AppState.STOPPED)
-                self.playing = False
+        seg = self.get_processed_segment()
+        if seg is None:
+            return
+
+        self.play_obj = _play_with_simpleaudio(seg)
+        self.play_obj.wait_done()
+
+        if self.playing:
+            self.root.after(0, self.stop_audio)
 
     def play_audio(self):
         if self.audio is None:
             return
+
+        self.playing = True
+        self.play_start_time = time.time()
+        self.set_state(AppState.PLAYING)
+
         threading.Thread(target=self.play_loop, daemon=True).start()
+        self.start_ui_timer()
 
     def pause_audio(self):
         if self.state == AppState.PLAYING and self.play_obj:
             self.playing = False
             self.play_obj.stop()
+            # Update scale to show paused position
+            if self.end_ms is not None and self.end_ms > 0:
+                progress_percent = (self.current_pos_ms / self.end_ms) * 100
+            self.update_time_label()
+            # Update start_ms to resume from this position
+            self.start_ms = self.current_pos_ms
             self.set_state(AppState.PAUSED)
 
     def stop_audio(self):
@@ -243,6 +289,10 @@ class PracticeApp:
             self.playing = False
             if self.play_obj:
                 self.play_obj.stop()
+            self.current_pos_ms = 0  # Reset to 0:00
+            self.start_ms = 0
+            self.update_time_label()
+            self.progress_scale.set(0)
             self.set_state(AppState.STOPPED)
 
     def toggle_metronome(self):
@@ -263,6 +313,20 @@ class PracticeApp:
             _play_with_simpleaudio(click_audio)
             bpm = self.bpm_scale.get()
             time.sleep(60.0 / bpm)
+
+    def start_ui_timer(self):
+        if self.state != AppState.PLAYING:
+            return
+        
+        elapsed = int((time.time() - self.play_start_time) * 1000)
+        self.current_pos_ms = min(self.start_ms + elapsed, self.end_ms)
+        self.progress_scale.set(self.current_pos_ms)
+        self.update_time_label()
+
+        if self.current_pos_ms < self.end_ms:
+            self.root.after(50, self.start_ui_timer)
+        else:
+            self.stop_audio()
 
 if __name__ == "__main__":
     root = tk.Tk()
