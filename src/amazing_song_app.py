@@ -3,7 +3,7 @@ from tkinter import filedialog
 import threading
 import time
 from pydub import AudioSegment, effects
-from pydub.playback import _play_with_simpleaudio
+import pygame
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -20,6 +20,9 @@ class PracticeApp:
         self.root = root
         self.root.title("Guitar with your guitar app")
 
+        # Initialize pygame mixer
+        pygame.mixer.init()
+
         # State machine
         self.state = AppState.IDLE
 
@@ -33,6 +36,9 @@ class PracticeApp:
         self.speed = 1.0
         self.tempo = 1.0
         self.volume = 0.0
+        self.clock = pygame.time.Clock()
+        self.sound = None
+        self.channel = None
 
         # Waveform
         self.fig, self.ax = plt.subplots(figsize=(6, 2))
@@ -53,7 +59,8 @@ class PracticeApp:
         self.time_label.pack(pady=5)
 
         # Progress scale
-        self.progress_scale = tk.Scale(root, from_=0, to=0, orient="horizontal", showvalue=0, label="Progress", command=self.on_scale_change)
+        self.progress_scale = tk.Scale(root, from_=0, to=0, orient="horizontal", 
+                                       showvalue=0, label="Progress", command=self.on_scale_change)
         self.progress_scale.pack(fill="x")
 
         self.speed_scale = tk.Scale(root, from_=40, to=180, resolution=1,
@@ -98,7 +105,7 @@ class PracticeApp:
     def update_time_label(self):
         """Update the time display label"""
         if self.end_ms is None:
-            total_time_str = "0:00:000"
+            total = "0:00:000"
         else:
             total = self.format_time(self.end_ms)
         current = self.format_time(self.current_pos_ms)
@@ -151,6 +158,14 @@ class PracticeApp:
             # print on gui with ("No file selected")
             self.set_state(AppState.IDLE)
 
+    def get_mixer_args(self):
+        return {
+            "frequency": int(self.audio.frame_rate * self.speed),
+            "size": -16,
+            "channels": self.audio.channels,
+            "buffer": 4096
+        }
+    
     def clear_song(self):
         self.stop_audio()
         self.audio = None
@@ -214,12 +229,13 @@ class PracticeApp:
         self.draw_markers()
 
     def on_scale_change(self, val):
-        if self.audio is None or self.state == AppState.PLAYING:
+        if self.audio is None or self.state == AppState.PLAYING or self.updating_scale:
             return
 
         self.current_pos_ms = int(val)
         self.start_ms = self.current_pos_ms
         self.update_time_label()
+
 
     def update_speed(self, val):
         self.speed = float(val)
@@ -236,64 +252,63 @@ class PracticeApp:
 
         seg = self.audio[self.start_ms:self.end_ms]
 
-        # Apply speed
-        seg = seg._spawn(seg.raw_data, overrides={
-            "frame_rate": int(seg.frame_rate * self.speed)
-        }).set_frame_rate(seg.frame_rate * self.speed)
+        # Speed (frame rate change)
+        if self.speed != 1.0:
+            seg = seg._spawn(seg.raw_data, overrides={
+                "frame_rate": int(seg.frame_rate * self.speed)
+            }).set_frame_rate(seg.frame_rate)
 
-        # Apply tempo (time-stretch without pitch change)
-        if self.tempo != 1.0:
-            seg = effects.speedup(seg, playback_speed=self.tempo)
-
-        # Apply volume
+        # Volume
         seg += self.volume
 
         return seg
-
-    def play_loop(self):
-        seg = self.get_processed_segment()
-        if seg is None:
-            return
-
-        self.play_obj = _play_with_simpleaudio(seg)
-        self.play_obj.wait_done()
-
-        if self.playing:
-            self.root.after(0, self.stop_audio)
 
     def play_audio(self):
         if self.audio is None:
             return
 
-        self.playing = True
+        pygame.mixer.quit()
+        pygame.mixer.init(**self.get_mixer_args())
+
+        seg = self.get_processed_segment()
+        if seg is None:
+            return
+
+        wav = seg.export(format="wav")
+        self.sound = pygame.mixer.Sound(wav)
+        self.channel = self.sound.play()
+
         self.play_start_time = time.time()
+        self.playing = True
         self.set_state(AppState.PLAYING)
 
-        threading.Thread(target=self.play_loop, daemon=True).start()
         self.start_ui_timer()
 
+
     def pause_audio(self):
-        if self.state == AppState.PLAYING and self.play_obj:
+        if self.state == AppState.PLAYING:
+            pygame.mixer.pause()
             self.playing = False
-            self.play_obj.stop()
-            # Update scale to show paused position
-            if self.end_ms is not None and self.end_ms > 0:
-                progress_percent = (self.current_pos_ms / self.end_ms) * 100
-            self.update_time_label()
-            # Update start_ms to resume from this position
+
+            elapsed = int((time.time() - self.play_start_time) * 1000)
+            self.current_pos_ms = min(self.start_ms + elapsed, self.end_ms)
             self.start_ms = self.current_pos_ms
+
             self.set_state(AppState.PAUSED)
+            self.update_time_label()
+
 
     def stop_audio(self):
-        if self.state in [AppState.PLAYING, AppState.PAUSED]:
-            self.playing = False
-            if self.play_obj:
-                self.play_obj.stop()
-            self.current_pos_ms = 0  # Reset to 0:00
-            self.start_ms = 0
-            self.update_time_label()
-            self.progress_scale.set(0)
-            self.set_state(AppState.STOPPED)
+        pygame.mixer.stop()
+        self.playing = False
+
+        self.current_pos_ms = 0
+        self.start_ms = 0
+        self.progress_scale.set(0)
+        self.update_time_label()
+
+        self.set_state(AppState.STOPPED)
+
 
     def toggle_metronome(self):
         if not self.metronome_on:
@@ -309,24 +324,34 @@ class PracticeApp:
         sample_rate = 44100
         click = (np.sin(2*np.pi*np.arange(int(0.05*sample_rate))*1000/sample_rate)*32767).astype(np.int16)
         click_audio = AudioSegment(click.tobytes(), frame_rate=sample_rate, sample_width=2, channels=1)
+        
+        # Export to bytes for pygame mixer
+        sound_data = click_audio.export(format="wav")
+        click_sound = pygame.mixer.Sound(sound_data)
+        
         while self.metronome_on:
-            _play_with_simpleaudio(click_audio)
+            click_sound.play()
             bpm = self.bpm_scale.get()
             time.sleep(60.0 / bpm)
 
     def start_ui_timer(self):
         if self.state != AppState.PLAYING:
             return
-        
+
         elapsed = int((time.time() - self.play_start_time) * 1000)
         self.current_pos_ms = min(self.start_ms + elapsed, self.end_ms)
+
+        self.updating_scale = True
         self.progress_scale.set(self.current_pos_ms)
+        self.updating_scale = False
+
         self.update_time_label()
 
-        if self.current_pos_ms < self.end_ms:
+        if self.channel and self.channel.get_busy():
             self.root.after(50, self.start_ui_timer)
         else:
             self.stop_audio()
+
 
 if __name__ == "__main__":
     root = tk.Tk()
