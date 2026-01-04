@@ -35,6 +35,8 @@ class PracticeApp:
         self.end_ms = None
         self.speed_percent = 100
         self.pending_speed = 100
+        self.play_speed_at_start = 100
+        self.updating_scale = False
         self.tempo = 1.0
         self.volume = 0.0
         self.clock = pygame.time.Clock()
@@ -241,6 +243,14 @@ class PracticeApp:
 
     def on_speed_drag(self, val):
         self.pending_speed = int(val)
+        # Live update speed while dragging: apply immediately when playing
+        if self.audio is None:
+            return
+
+        new_speed = self.pending_speed
+        if self.state == AppState.PLAYING and new_speed != self.speed_percent:
+            self.speed_percent = new_speed
+            self.restart_playback()
 
     def on_speed_commit(self, event):
         if self.audio is None:
@@ -253,9 +263,10 @@ class PracticeApp:
     
     def restart_playback(self):
         pygame.mixer.stop()
-
-        elapsed = int((time.time() - self.play_start_time) * 1000)
-        self.current_pos_ms = min(self.start_ms + elapsed, self.end_ms)
+        # Compute how many source-ms were consumed based on previous play speed
+        elapsed_real_ms = int((time.time() - self.play_start_time) * 1000)
+        elapsed_source_ms = int(elapsed_real_ms * (self.play_speed_at_start / 100.0))
+        self.current_pos_ms = min(self.start_ms + elapsed_source_ms, self.end_ms)
         self.start_ms = self.current_pos_ms
 
         self.play_audio()
@@ -316,8 +327,9 @@ class PracticeApp:
         wav = seg.export(format="wav")
         self.sound = pygame.mixer.Sound(wav)
         self.channel = self.sound.play()
-
+        # record the real time when playback started and the play speed in effect
         self.play_start_time = time.time()
+        self.play_speed_at_start = self.speed_percent
         self.playing = True
         self.set_state(AppState.PLAYING)
 
@@ -328,9 +340,10 @@ class PracticeApp:
         if self.state == AppState.PLAYING:
             pygame.mixer.pause()
             self.playing = False
-
-            elapsed = int((time.time() - self.play_start_time) * 1000)
-            self.current_pos_ms = min(self.start_ms + elapsed, self.end_ms)
+            # Scale real elapsed time by the play speed that was active
+            elapsed_real_ms = int((time.time() - self.play_start_time) * 1000)
+            elapsed_source_ms = int(elapsed_real_ms * (self.play_speed_at_start / 100.0))
+            self.current_pos_ms = min(self.start_ms + elapsed_source_ms, self.end_ms)
             self.start_ms = self.current_pos_ms
 
             self.set_state(AppState.PAUSED)
@@ -378,8 +391,10 @@ class PracticeApp:
         if self.state != AppState.PLAYING:
             return
 
-        elapsed = int((time.time() - self.play_start_time) * 1000)
-        self.current_pos_ms = min(self.start_ms + elapsed, self.end_ms)
+        # Convert real elapsed time into source milliseconds based on play speed
+        elapsed_real_ms = int((time.time() - self.play_start_time) * 1000)
+        elapsed_source_ms = int(elapsed_real_ms * (self.play_speed_at_start / 100.0))
+        self.current_pos_ms = min(self.start_ms + elapsed_source_ms, self.end_ms)
 
         self.updating_scale = True
         self.progress_scale.set(self.current_pos_ms)
